@@ -1,15 +1,17 @@
 name: gg_quickjs
-description: A starting point for Dart libraries or applications.
-version: 1.0.0
-# repository: https://github.com/my_org/my_repo
+description: QuickJS-ng for Dart - its C sources for the build hooks of native packages and a Dart binding with typed values, a background isolate and a sandbox.
+version: 0.0.1
+repository: https://github.com/ggsuite/gg_quickjs
 
 environment:
-  sdk: ^3.13.4
+  sdk: ">=3.13.0 <4.0.0"
 
 # Add regular dependencies here.
 dependencies:
   # path: ^1.9.0
 
 dev_dependencies:
+  dna_ggsuite: ^0.5.0
+  helix: ^1.12.0
   lints: ^6.0.0
   test: ^1.25.6
