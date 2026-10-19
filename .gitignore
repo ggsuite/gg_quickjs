@@ -2,9 +2,6 @@
 # Created by `dart pub`
 .dart_tool/
 
-# Avoid committing pubspec.lock for library packages; see
-# https://dart.dev/tools/pub/private-files#pubspec-lock.
-pubspec.lock
 !.gg/gg.json
 # https://dart.dev/guides/libraries/private-files
 *.vm.json
