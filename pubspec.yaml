@@ -1,6 +1,6 @@
 name: gg_quickjs
 description: QuickJS-ng for Dart - its C sources for the build hooks of native packages and a Dart binding with typed values, a background isolate and a sandbox.
-version: 0.0.1
+version: 0.1.0
 repository: https://github.com/ggsuite/gg_quickjs
 issue_tracker: https://github.com/ggsuite/gg_quickjs/issues
 

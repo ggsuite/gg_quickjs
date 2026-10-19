@@ -9,4 +9,4 @@
 // coverage:ignore-file
 
 /// The version of the `gg_quickjs` package.
-const String ggQuickjsVersion = '0.0.1';
+const String ggQuickjsVersion = '0.1.0';

@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## 0.1.0 - 2026-10-19
 
 ### Added
 
@@ -29,14 +29,21 @@
 - Add review fixes: conversion limits, fetch, handles
 
 - src/gg_quickjs.c: a conversion to Dart keeps to the timeout, an interrupt and four times the memory limit, e.g. for a sparse array
-- src/gg_quickjs.c: a call holds its function, this and the value it converts; Map entries of a replaced iterator fail cleanly; a huge timeout or memory limit no longer overflows
-- JsRuntime: frees the handles disposed during a call once it returns; a runtime that nobody disposes no longer keeps its isolate alive; a revoked host function releases its argument handles
-- fetch: drops Host and the other headers that HTTP controls and refuses a response beyond memoryLimit
-- setTimeout and setInterval: wait at most 2^31 - 1 ms instead of failing for Infinity
-- fs.list: lists a folder asynchronously
-- tool/update-quickjs-ng.js: accepts only a plain tag name for its shell command
-- doc/blog/2026/2026-10-19-quickjs-ng-for-build-hooks-and-dart.md: the blog post of gg_quickjs 0.1.0, in English and in German under doc/de/blog
-- index.jsonc: summary, domain and interfaces of the repo
-- README in English and German, API docs and tests
 
-Co-Authored-By: Claude Opus 5.5 [noreply@anthropic.com](mailto:noreply@anthropic.com)
+- src/gg_quickjs.c: a call holds its function, this and the value it converts; Map entries of a replaced iterator fail cleanly; a huge timeout or memory limit no longer overflows
+
+- JsRuntime: frees the handles disposed during a call once it returns; a runtime that nobody disposes no longer keeps its isolate alive; a revoked host function releases its argument handles
+
+- fetch: drops Host and the other headers that HTTP controls and refuses a response beyond memoryLimit
+
+- setTimeout and setInterval: wait at most 2^31 - 1 ms instead of failing for Infinity
+
+- fs.list: lists a folder asynchronously
+
+- tool/update-quickjs-ng.js: accepts only a plain tag name for its shell command
+
+- doc/blog/2026/2026-10-19-quickjs-ng-for-build-hooks-and-dart.md: the blog post of gg_quickjs 0.1.0, in English and in German under doc/de/blog
+
+- index.jsonc: summary, domain and interfaces of the repo
+
+- README in English and German, API docs and tests
