@@ -33,7 +33,9 @@ void Function() installJsTimers(JsRuntime runtime) {
       throw JsTypeError(message: 'the callback must be a function');
     }
     final delay = arguments.length > 1 ? arguments[1] : null;
-    final milliseconds = delay is num && delay > 0 ? delay.toInt() : 0;
+    final milliseconds = delay is num && delay > 0
+        ? delay.clamp(0, _maxDelay).toInt()
+        : 0;
     final rest = arguments.length > 2
         ? arguments.sublist(2)
         : const <Object?>[];
@@ -85,3 +87,7 @@ void Function() installJsTimers(JsRuntime runtime) {
     timers.clear();
   };
 }
+
+// The longest delay in milliseconds, 2^31 - 1 as in browsers; a longer one,
+// `Infinity` included, waits that long.
+const _maxDelay = 0x7fffffff;

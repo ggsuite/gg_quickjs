@@ -12,8 +12,10 @@
 //
 // Every entry point that runs JavaScript updates the stack top on its
 // outermost call, sets the deadline of the time budget, runs the pending
-// jobs when it returns to Dart and reports unhandled rejections. Only
-// gg_qjs_interrupt and gg_qjs_close may be called from another thread.
+// jobs when it returns to Dart and reports unhandled rejections. The
+// conversion of a value to Dart keeps to the time budget and to four times
+// the memory limit. Only gg_qjs_interrupt and gg_qjs_close may be called
+// from another thread.
 
 #ifndef GG_QUICKJS_H
 #define GG_QUICKJS_H
@@ -167,7 +169,9 @@ GG_QJS_EXPORT int32_t gg_qjs_keys(GgQjsRuntime* runtime, uint64_t object,
 GG_QJS_EXPORT int32_t gg_qjs_to_value(GgQjsRuntime* runtime, uint64_t handle,
                                       GgQjsBytes* result);
 
-// Frees a handle.
+// Frees a handle. A running call holds its function, `this` and the value
+// it converts, but an encoded value must not name a freed handle, so the
+// Dart binding frees the handles of a call once it returns.
 GG_QJS_EXPORT void gg_qjs_free_handle(GgQjsRuntime* runtime, uint64_t handle);
 
 // Creates a promise; the result is an array of the handles of the promise

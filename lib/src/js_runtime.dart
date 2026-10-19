@@ -75,6 +75,11 @@ final class JsRuntime {
     _rejection = NativeCallable<GgQjsRejectionNative>.isolateLocal(
       _onRejection,
     );
+    // The bridge calls back only during a call, so a runtime that nobody
+    // disposes does not keep the isolate alive.
+    for (final callable in _callables) {
+      callable.keepIsolateAlive = false;
+    }
     _native = openNativeRuntime(
       memoryLimit: options.memoryLimit ?? 0,
       maxStackSize: options.maxStackSize,
@@ -239,7 +244,9 @@ final class JsRuntime {
   }
 
   /// Frees the runtime and every handle; any further call throws a
-  /// [StateError]. A no-op when the runtime is disposed already.
+  /// [StateError]. A no-op when the runtime is disposed already. A runtime
+  /// that is never disposed holds its native memory, but does not keep its
+  /// isolate alive.
   void dispose() {
     if (_disposed) return;
     if (_depth > 0) {
@@ -324,6 +331,7 @@ final class JsRuntime {
   final _rejections = <Object?>[];
   final _pending = <Completer<Object?>>{};
   final _disposers = <void Function()>[];
+  final _releases = <int>[];
   var _nextFunctionId = 1;
   var _depth = 0;
   var _disposed = false;
@@ -367,11 +375,17 @@ final class JsRuntime {
     if (_disposed) throw StateError('The JsRuntime is disposed');
   }
 
+  List<NativeCallable<Function>> get _callables => [
+    _hostCall,
+    _hostRelease,
+    _moduleLoad,
+    _rejection,
+  ];
+
   void _closeCallables() {
-    _hostCall.close();
-    _hostRelease.close();
-    _moduleLoad.close();
-    _rejection.close();
+    for (final callable in _callables) {
+      callable.close();
+    }
   }
 
   // Calls an entry point of the bridge and returns its result; throws the
@@ -388,7 +402,10 @@ final class JsRuntime {
     } finally {
       _depth--;
       calloc.free(result);
-      if (_depth == 0) _flushRejections();
+      if (_depth == 0) {
+        _flushReleases();
+        _flushRejections();
+      }
     }
   }
 
@@ -555,8 +572,22 @@ final class JsRuntime {
     _run((result) => ggQjsToValue(_native, _host.addressOf(value), result)),
   );
 
+  // Frees a handle; during a call only once the call returns, as the call
+  // may still use its value, e.g. a function that disposes its own handle.
   void _free(int address) {
-    if (!_disposed) ggQjsFreeHandle(_native, address);
+    if (_disposed) return;
+    if (_depth > 0) {
+      _releases.add(address);
+    } else {
+      ggQjsFreeHandle(_native, address);
+    }
+  }
+
+  void _flushReleases() {
+    for (final address in _releases) {
+      ggQjsFreeHandle(_native, address);
+    }
+    _releases.clear();
   }
 
   int _addFunction(Function function) {
@@ -653,13 +684,15 @@ final class JsRuntime {
     Pointer<GgQjsBytes> result,
   ) {
     try {
+      // Decoded first, so that the handles among the arguments are released
+      // also when the function was revoked.
+      final arguments =
+          _codec.decode(Uint8List.fromList(args.asTypedList(length)))!
+              as List<Object?>;
       final function = _functions[id];
       if (function == null) {
         throw JsTypeError(message: 'the host function was revoked');
       }
-      final arguments =
-          _codec.decode(Uint8List.fromList(args.asTypedList(length)))!
-              as List<Object?>;
       final value = (function as JsHostFunction)(arguments);
       _give(result, _codec.encode(value));
       return 0;

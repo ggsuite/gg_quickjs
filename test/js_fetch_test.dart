@@ -27,6 +27,10 @@ void main() {
         response.write('{"a": [1, 2]}');
       case '/bytes':
         response.add([0, 1, 255]);
+      case '/host':
+        response.write(request.headers.value(HttpHeaders.hostHeader));
+      case '/large':
+        response.add(List.filled(2 * 1024 * 1024, 7));
       case '/echo':
         response.write(
           jsonEncode({
@@ -146,6 +150,37 @@ void main() {
           {'method': 'POST', 'header': '7', 'body': '42'},
           {'method': 'POST', 'header': '7', 'body': ''},
         ],
+      );
+    });
+
+    test('drops the headers that HTTP itself controls', () async {
+      expect(
+        await run(
+          'const r = await fetch(base + "/host", '
+          '{headers: {Host: "admin.internal", Connection: "upgrade"}});\n'
+          'return r.text();',
+        ),
+        'localhost:${server.port}',
+      );
+    });
+
+    test('refuses a response beyond the memory limit', () async {
+      final limited = JsRuntime(
+        options: JsRuntimeOptions(
+          memoryLimit: 1024 * 1024,
+          network: JsNetworkAccess(allowedHosts: {'localhost:${server.port}'}),
+        ),
+      );
+      addTearDown(limited.dispose);
+      await expectLater(
+        limited.evaluate('fetch("$base/large")')! as Future<Object?>,
+        throwsA(
+          isA<JsRangeError>().having(
+            (e) => e.message,
+            'message',
+            'fetch: the response of $base/large exceeds the memory limit',
+          ),
+        ),
       );
     });
 

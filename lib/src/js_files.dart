@@ -51,10 +51,9 @@ void installJsFiles(JsRuntime runtime, JsFileSystemAccess access) {
     'exists': (List<Object?> arguments) async =>
         _argument(arguments) != null &&
         access.resolveRead(_argument(arguments)!) != null,
-    'list': (List<Object?> arguments) async => [
-      for (final entity in Directory(readable(arguments)).listSync())
-        p.basename(entity.path),
-    ]..sort(),
+    'list': (List<Object?> arguments) async =>
+        (await Directory(readable(arguments)).list().map(_name).toList())
+          ..sort(),
     'remove': (List<Object?> arguments) async {
       await File(writable(arguments)).delete();
       return null;
@@ -72,6 +71,8 @@ String? readJsModuleFile(String name, JsFileSystemAccess? access) {
   }
   return File(path).readAsStringSync();
 }
+
+String _name(FileSystemEntity entity) => p.basename(entity.path);
 
 String? _argument(List<Object?> arguments) {
   final path = arguments.isEmpty ? null : arguments[0];

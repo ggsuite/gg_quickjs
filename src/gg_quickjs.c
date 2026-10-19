@@ -33,6 +33,15 @@
 // The deepest nesting of arrays and objects that a conversion follows.
 #define GG_QJS_MAX_DEPTH 256
 
+// A conversion checks the time budget and the interrupt after this many
+// values.
+#define GG_QJS_POLL_INTERVAL 1024
+
+// The encoding of a value may take this many times the memory limit. Only
+// references make an encoding larger than the value, e.g. a sparse array or
+// one object referenced again and again.
+#define GG_QJS_ENCODING_FACTOR 4
+
 // The kinds of GG_QJS_TAG_HANDLE.
 #define GG_QJS_HANDLE_OTHER 0
 #define GG_QJS_HANDLE_OBJECT 1
@@ -91,6 +100,9 @@ static const char kHelpers[] =
 #define GG_QJS_HELPER_BIGINT 3
 #define GG_QJS_HELPER_ERROR 4
 #define GG_QJS_HELPER_COUNT 5
+
+// The longest timeout, a century in microseconds.
+static const int64_t kMaxTimeoutUs = INT64_C(100) * 365 * 24 * 3600 * 1000000;
 
 // ############################################################################
 // Types
@@ -151,6 +163,8 @@ typedef struct GgQjsBuffer {
   size_t length;
   size_t capacity;
   bool failed;
+  // The largest length; 0 for none.
+  size_t limit;
 } GgQjsBuffer;
 
 // The state of an encoding: the objects on the way down, to find cycles.
@@ -159,6 +173,7 @@ typedef struct GgQjsEncoder {
   GgQjsBuffer buffer;
   void* path[GG_QJS_MAX_DEPTH];
   int depth;
+  uint32_t count;
 } GgQjsEncoder;
 
 // A cursor in an encoded value.
@@ -259,6 +274,10 @@ static const JSMallocFunctions kHeap = {heap_calloc, heap_malloc, heap_free,
 
 static bool buffer_reserve(GgQjsBuffer* b, size_t extra) {
   if (b->failed) return false;
+  if (b->limit != 0 && (extra > b->limit || b->length > b->limit - extra)) {
+    b->failed = true;
+    return false;
+  }
   if (b->length + extra <= b->capacity) return true;
   size_t capacity = b->capacity == 0 ? 256 : b->capacity;
   while (capacity < b->length + extra) capacity *= 2;
@@ -395,6 +414,36 @@ static JSValue box_value(uint64_t handle) {
 // Encoding
 
 static int encode_value(GgQjsEncoder* e, JSValueConst value);
+static int interrupt_handler(JSRuntime* rt, void* opaque);
+
+// Throws the uncatchable error of an interrupted script.
+static void throw_interrupted(JSContext* ctx) {
+  JS_ThrowInternalError(ctx, "interrupted");
+  JSValue error = JS_GetException(ctx);
+  JS_SetUncatchableError(ctx, error);
+  JS_Throw(ctx, error);
+}
+
+// Whether a conversion may go on; throws when it may not. It stops when its
+// encoding outgrows the limit of encoder_init and, every
+// GG_QJS_POLL_INTERVAL values, at the time budget, an interrupt or the
+// closing of the runtime, so that a value of references, e.g. a sparse
+// array, stays within the limits of the runtime. The description of an
+// error ignores an interrupt, as the interrupt is what it describes.
+static bool encoder_continues(GgQjsEncoder* e) {
+  GgQjsRuntime* r = e->r;
+  if (e->buffer.failed) {
+    JS_ThrowOutOfMemory(r->ctx);
+    return false;
+  }
+  if (++e->count % GG_QJS_POLL_INTERVAL != 0) return true;
+  bool stop = r->describing
+                  ? atomic_load(&r->closing) ||
+                        (r->deadline_ns != 0 && now_ns() > r->deadline_ns)
+                  : interrupt_handler(r->rt, r) != 0;
+  if (stop) throw_interrupted(r->ctx);
+  return !stop;
+}
 
 // Writes the property `name` of `object` as a string; empty when it is
 // missing or cannot be read.
@@ -475,10 +524,15 @@ static int encode_collection(GgQjsEncoder* e, uint8_t tag,
     buffer_u8(&e->buffer, tag);
     buffer_u32(&e->buffer, (uint32_t)length);
     for (int64_t i = 0; status == 0 && i < length; ++i) {
+      // A script may replace the iterator of Map, so an entry may be
+      // anything; a failed read leaves an exception, never a value.
       JSValue entry = JS_GetPropertyUint32(ctx, items, (uint32_t)i);
-      JSValue key = JS_GetPropertyUint32(ctx, entry, 0);
-      JSValue item = JS_GetPropertyUint32(ctx, entry, 1);
-      status = encode_value(e, key);
+      JSValue key = JS_IsException(entry)
+                        ? JS_EXCEPTION
+                        : JS_GetPropertyUint32(ctx, entry, 0);
+      JSValue item = JS_IsException(key) ? JS_EXCEPTION
+                                         : JS_GetPropertyUint32(ctx, entry, 1);
+      status = JS_IsException(item) ? -1 : encode_value(e, key);
       if (status == 0) status = encode_value(e, item);
       JS_FreeValue(ctx, item);
       JS_FreeValue(ctx, key);
@@ -648,6 +702,7 @@ static int encode_text(GgQjsEncoder* e, uint8_t tag, JSValueConst value) {
 }
 
 static int encode_value(GgQjsEncoder* e, JSValueConst value) {
+  if (!encoder_continues(e)) return -1;
   if (JS_IsUndefined(value)) {
     buffer_u8(&e->buffer, GG_QJS_TAG_UNDEFINED);
   } else if (JS_IsNull(value)) {
@@ -677,10 +732,19 @@ static int encode_value(GgQjsEncoder* e, JSValueConst value) {
   return 0;
 }
 
+// The largest encoding of a value: GG_QJS_ENCODING_FACTOR times the memory
+// limit, 0 for none without a limit.
+static size_t encoding_limit(const GgQjsRuntime* r) {
+  if (r->memory_limit > SIZE_MAX / GG_QJS_ENCODING_FACTOR) return SIZE_MAX;
+  return r->memory_limit * GG_QJS_ENCODING_FACTOR;
+}
+
 static void encoder_init(GgQjsEncoder* e, GgQjsRuntime* r) {
   e->r = r;
   memset(&e->buffer, 0, sizeof(e->buffer));
+  e->buffer.limit = encoding_limit(r);
   e->depth = 0;
+  e->count = 0;
 }
 
 // Encodes `value` as a converted value or as a handle into `out`;
@@ -1041,9 +1105,13 @@ static int32_t describe(GgQjsRuntime* r, GgQjsBytes* out) {
   GgQjsEncoder e;
   encoder_init(&e, r);
   buffer_u8(&e.buffer, reason);
-  if (encode_value(&e, exception) < 0) {
+  if (encode_value(&e, exception) < 0 || e.buffer.failed) {
     JS_FreeValue(ctx, JS_GetException(ctx));
+    // The fallback fits the capacity of the reason byte, also when the
+    // value outgrew the limit.
     e.buffer.length = 1;
+    e.buffer.failed = e.buffer.data == NULL;
+    e.buffer.limit = 0;
     buffer_u8(&e.buffer, GG_QJS_TAG_ERROR);
     buffer_string(&e.buffer, "Error", 5);
     buffer_string(&e.buffer, "the thrown value cannot be converted", 36);
@@ -1263,7 +1331,11 @@ GgQjsRuntime* gg_qjs_new(int64_t memory_limit, int64_t max_stack_size,
   r->host_release = host_release;
   r->module_load = module_load;
   r->rejection = rejection;
-  r->timeout_ns = timeout_us > 0 ? timeout_us * 1000 : 0;
+  // A timeout beyond a century counts as a century, so that no deadline
+  // overflows.
+  r->timeout_ns = timeout_us <= 0              ? 0
+                  : timeout_us < kMaxTimeoutUs ? timeout_us * 1000
+                                               : kMaxTimeoutUs * 1000;
   atomic_init(&r->interrupt_requested, 0);
   atomic_init(&r->closing, 0);
   r->rt = JS_NewRuntime2(&kHeap, r);
@@ -1296,7 +1368,9 @@ GgQjsRuntime* gg_qjs_new(int64_t memory_limit, int64_t max_stack_size,
   // The limit applies once the context exists: QuickJS-ng 0.17.0 does not
   // recover from running out of memory inside JS_NewContext. A limit that
   // the runtime itself exceeds fails the creation.
-  r->memory_limit = memory_limit > 0 ? (size_t)memory_limit : 0;
+  r->memory_limit = memory_limit <= 0                     ? 0
+                    : (uint64_t)memory_limit > SIZE_MAX ? SIZE_MAX
+                                                        : (size_t)memory_limit;
   if (r->memory_limit != 0 && r->allocated > r->memory_limit) {
     gg_qjs_dispose(r);
     return NULL;
@@ -1339,22 +1413,18 @@ int32_t gg_qjs_eval(GgQjsRuntime* r, const char* code, size_t length,
 }
 
 // Evaluates a compiled module and encodes [promise, namespace].
-static int evaluate_module(GgQjsRuntime* r, JSValue module, GgQjsBuffer* b) {
-  JSContext* ctx = r->ctx;
+static int evaluate_module(GgQjsEncoder* e, JSValue module) {
+  JSContext* ctx = e->r->ctx;
   JSModuleDef* definition = (JSModuleDef*)JS_VALUE_GET_PTR(module);
   JSValue promise = JS_EvalFunction(ctx, module);
   if (JS_IsException(promise)) return -1;
   JSValue space = JS_GetModuleNamespace(ctx, definition);
-  GgQjsEncoder e;
-  encoder_init(&e, r);
-  e.buffer = *b;
-  int status = encode_handle(&e, promise);
+  int status = encode_handle(e, promise);
   if (status == 0 && !JS_IsException(space)) {
-    status = encode_handle(&e, space);
+    status = encode_handle(e, space);
   } else {
     status = -1;
   }
-  *b = e.buffer;
   JS_FreeValue(ctx, space);
   JS_FreeValue(ctx, promise);
   return status;
@@ -1378,7 +1448,8 @@ int32_t gg_qjs_eval_module(GgQjsRuntime* r, const char* code, size_t length,
                            const char* filename, GgQjsBytes* out) {
   enter(r);
   JSContext* ctx = r->ctx;
-  GgQjsBuffer b = {NULL, 0, 0, false};
+  GgQjsEncoder e;
+  encoder_init(&e, r);
   JSValue module = compile(r, code, length, filename, JS_EVAL_TYPE_MODULE);
   int status = -1;
   if (!JS_IsException(module)) {
@@ -1388,11 +1459,11 @@ int32_t gg_qjs_eval_module(GgQjsRuntime* r, const char* code, size_t length,
                                 JS_PROP_C_W_E);
     }
     JS_FreeValue(ctx, meta);
-    buffer_u8(&b, GG_QJS_TAG_ARRAY);
-    buffer_u32(&b, 2);
-    status = evaluate_module(r, module, &b);
+    buffer_u8(&e.buffer, GG_QJS_TAG_ARRAY);
+    buffer_u32(&e.buffer, 2);
+    status = evaluate_module(&e, module);
   }
-  return finish_buffer(r, status, &b, out);
+  return finish_buffer(r, status, &e.buffer, out);
 }
 
 int32_t gg_qjs_compile(GgQjsRuntime* r, const char* code, size_t length,
@@ -1428,37 +1499,40 @@ int32_t gg_qjs_eval_bytecode(GgQjsRuntime* r, const uint8_t* bytecode,
                              size_t length, int32_t mode, GgQjsBytes* out) {
   enter(r);
   JSContext* ctx = r->ctx;
-  GgQjsBuffer b = {NULL, 0, 0, false};
+  GgQjsEncoder e;
+  encoder_init(&e, r);
   r->unlimited = true;
   JSValue compiled = JS_ReadObject(ctx, bytecode, length, JS_READ_OBJ_BYTECODE);
   r->unlimited = false;
   int status = -1;
   if (!JS_IsException(compiled)) {
     bool module = JS_VALUE_GET_TAG(compiled) == JS_TAG_MODULE;
-    buffer_u8(&b, GG_QJS_TAG_ARRAY);
-    buffer_u32(&b, 3);
-    buffer_u8(&b, module ? GG_QJS_TAG_TRUE : GG_QJS_TAG_FALSE);
+    buffer_u8(&e.buffer, GG_QJS_TAG_ARRAY);
+    buffer_u32(&e.buffer, 3);
+    buffer_u8(&e.buffer, module ? GG_QJS_TAG_TRUE : GG_QJS_TAG_FALSE);
     if (module) {
       if (JS_ResolveModule(ctx, compiled) < 0) {
         JS_FreeValue(ctx, compiled);
       } else {
-        status = evaluate_module(r, compiled, &b);
+        status = evaluate_module(&e, compiled);
       }
     } else {
       JSValue value = JS_EvalFunction(ctx, compiled);
       if (!JS_IsException(value)) {
-        GgQjsEncoder e;
-        encoder_init(&e, r);
-        e.buffer = b;
         status = mode == GG_QJS_HANDLE ? encode_handle(&e, value)
                                        : encode_value(&e, value);
-        b = e.buffer;
-        buffer_u8(&b, GG_QJS_TAG_UNDEFINED);
+        buffer_u8(&e.buffer, GG_QJS_TAG_UNDEFINED);
       }
       JS_FreeValue(ctx, value);
     }
   }
-  return finish_buffer(r, status, &b, out);
+  return finish_buffer(r, status, &e.buffer, out);
+}
+
+// The object `handle` refers to, or the global object for 0; owned.
+static JSValue target(GgQjsRuntime* r, uint64_t handle) {
+  return handle != 0 ? JS_DupValue(r->ctx, box_value(handle))
+                     : JS_GetGlobalObject(r->ctx);
 }
 
 int32_t gg_qjs_call(GgQjsRuntime* r, uint64_t function, uint64_t self,
@@ -1470,20 +1544,17 @@ int32_t gg_qjs_call(GgQjsRuntime* r, uint64_t function, uint64_t self,
   JSValue* argv = NULL;
   int status = -1;
   if (decode_arguments(r, args, length, &argc, &argv)) {
-    JSValue value =
-        JS_Call(ctx, box_value(function),
-                self != 0 ? box_value(self) : JS_UNDEFINED, argc, argv);
+    // Owned, as a host function may free the handles during the call.
+    JSValue callee = target(r, function);
+    JSValue receiver = self != 0 ? target(r, self) : JS_UNDEFINED;
+    JSValue value = JS_Call(ctx, callee, receiver, argc, argv);
     status = JS_IsException(value) ? -1 : encode_result(r, value, mode, out);
     JS_FreeValue(ctx, value);
+    JS_FreeValue(ctx, receiver);
+    JS_FreeValue(ctx, callee);
     free_arguments(r, argc, argv);
   }
   return leave(r, status, out);
-}
-
-// The object `handle` refers to, or the global object for 0; owned.
-static JSValue target(GgQjsRuntime* r, uint64_t handle) {
-  return handle != 0 ? JS_DupValue(r->ctx, box_value(handle))
-                     : JS_GetGlobalObject(r->ctx);
 }
 
 static JSAtom decode_key(GgQjsRuntime* r, const uint8_t* key, size_t length) {
@@ -1552,7 +1623,7 @@ int32_t gg_qjs_keys(GgQjsRuntime* r, uint64_t object, GgQjsBytes* out) {
   JSPropertyEnum* properties = NULL;
   uint32_t count = 0;
   int status = -1;
-  GgQjsBuffer b = {NULL, 0, 0, false};
+  GgQjsBuffer b = {NULL, 0, 0, false, 0};
   if (JS_GetOwnPropertyNames(ctx, &properties, &count, owner,
                              JS_GPN_STRING_MASK | JS_GPN_ENUM_ONLY) == 0) {
     status = 0;
@@ -1577,7 +1648,10 @@ int32_t gg_qjs_keys(GgQjsRuntime* r, uint64_t object, GgQjsBytes* out) {
 
 int32_t gg_qjs_to_value(GgQjsRuntime* r, uint64_t handle, GgQjsBytes* out) {
   enter(r);
-  int status = encode_result(r, box_value(handle), GG_QJS_CONVERT, out);
+  // Owned, as a getter may call a host function that frees the handle.
+  JSValue value = target(r, handle);
+  int status = encode_result(r, value, GG_QJS_CONVERT, out);
+  JS_FreeValue(r->ctx, value);
   return leave(r, status, out);
 }
 
@@ -1588,7 +1662,7 @@ void gg_qjs_free_handle(GgQjsRuntime* r, uint64_t handle) {
 int32_t gg_qjs_new_promise(GgQjsRuntime* r, GgQjsBytes* out) {
   enter(r);
   JSContext* ctx = r->ctx;
-  GgQjsBuffer b = {NULL, 0, 0, false};
+  GgQjsBuffer b = {NULL, 0, 0, false, 0};
   JSValue functions[2];
   JSValue promise = JS_NewPromiseCapability(ctx, functions);
   int status = -1;

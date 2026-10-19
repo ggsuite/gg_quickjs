@@ -143,7 +143,10 @@ below its roots. Evaluate only bytecode that this package compiled.
 
 `JsRuntimeOptions` takes `memoryLimit`, `maxStackSize`, `gcThreshold` and
 `timeout`, the time that one call into JavaScript may take with its pending
-jobs. `interrupt()` stops the JavaScript that runs now. Errors arrive as the
+jobs. The limits cover the conversion of a result too: it stops at the
+timeout and at four times the memory limit, so that a sparse array or an
+object referenced again and again cannot outgrow them. `interrupt()` stops
+the JavaScript that runs now. Errors arrive as the
 sealed `JsException`: `JsSyntaxError`, `JsTypeError`, `JsReferenceError`,
 `JsRangeError`, `JsInterruptedError`, `JsOutOfMemoryError`,
 `JsStackOverflowError` and `JsError` for the rest, each with `name`,
@@ -184,7 +187,9 @@ final runtime = JsRuntime(
 - `onConsole` adds `console`; `timers` adds `setTimeout`, `setInterval`,
   `clearTimeout` and `clearInterval` on Dart timers.
 - `network` adds `fetch`, which reaches only the allowed hosts and checks
-  every redirect again.
+  every redirect again. As in browsers, it drops the headers that HTTP
+  itself controls, e.g. `Host`, and it refuses a response beyond
+  `memoryLimit`.
 - `fileSystem` adds a global `fs` with `readText`, `readBytes`, `writeText`,
   `writeBytes`, `exists`, `list` and `remove`, and lets `import` load files.
   Paths must be absolute; `..` and symbolic links are resolved before the

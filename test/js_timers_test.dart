@@ -55,6 +55,16 @@ void main() {
       expect(errors, [isA<JsRangeError>()]);
     });
 
+    test('waits at most 2^31 - 1 milliseconds', () async {
+      runtime.evaluate(
+        'var fired = false; const ids = [Infinity, 1e20]\n'
+        '  .map((delay) => setTimeout(() => fired = true, delay));',
+      );
+      await wait(20);
+      expect(runtime.getGlobal('fired'), isFalse);
+      runtime.evaluate('ids.forEach(clearTimeout)');
+    });
+
     test('refuses a callback that is no function', () {
       expect(
         () => runtime.evaluate('setTimeout("code", 1)'),

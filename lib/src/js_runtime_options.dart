@@ -48,12 +48,14 @@ typedef JsModuleLoader = String? Function(String name);
 final class JsRuntimeOptions {
   /// Creates options.
   ///
-  /// - [memoryLimit] the bytes the runtime may allocate; null for no limit
+  /// - [memoryLimit] the bytes the runtime may allocate; null for no limit.
+  ///   A converted value may take four times as much.
   /// - [maxStackSize] the bytes of native stack that JavaScript may use
   /// - [gcThreshold] the bytes after which the garbage collector runs; null
   ///   for the default of QuickJS-ng
   /// - [timeout] the time that one call into JavaScript may take, its
-  ///   pending jobs included; null for no limit
+  ///   pending jobs and the conversion of its result included; null for no
+  ///   limit
   /// - [onConsole] receives `console` output; the `console` object exists
   ///   only with it
   /// - [onUnhandledRejection] receives the reasons of unhandled rejections
@@ -118,6 +120,10 @@ final class JsRuntimeOptions {
 
   // ...........................................................................
   /// The bytes the runtime may allocate; null for no limit.
+  ///
+  /// The encoding of a value that crosses to Dart may take four times as
+  /// much; more stops the call with a [JsOutOfMemoryError], e.g. for a
+  /// sparse array. `fetch` refuses a response beyond it.
   final int? memoryLimit;
 
   /// The bytes of native stack that JavaScript may use, counted from the
@@ -133,8 +139,8 @@ final class JsRuntimeOptions {
   /// of QuickJS-ng.
   final int? gcThreshold;
 
-  /// The time that one call into JavaScript may take, its pending jobs
-  /// included; null for no limit.
+  /// The time that one call into JavaScript may take, its pending jobs and
+  /// the conversion of its result included; null for no limit.
   final Duration? timeout;
 
   /// Receives `console` output; without it, `console` does not exist.

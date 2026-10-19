@@ -26,6 +26,22 @@ void main() {
         value.dispose();
       });
 
+      test('keeps the value while a getter frees the handle', () {
+        late final JsValue value;
+        runtime.registerFunction('release', (_) {
+          value.dispose();
+          runtime.runGc();
+          return null;
+        });
+        value = runtime.evaluateHandle(
+          '({get a() { release(); return [1, 2]; }, b: "b"})',
+        );
+        expect(value.toDart(), {
+          'a': [1, 2],
+          'b': 'b',
+        });
+      });
+
       test('throws a StateError after dispose()', () {
         final value = runtime.evaluateHandle('1')..dispose();
         expect(value.isDisposed, isTrue);
@@ -112,6 +128,22 @@ void main() {
         function.dispose();
         expect(() => function.call(), throwsStateError);
         expect(() => function.callHandle(), throwsStateError);
+      });
+
+      test('keep the function and this while a host function frees them', () {
+        late final JsFunction function;
+        late final JsValue self;
+        runtime.registerFunction('release', (_) {
+          function.dispose();
+          self.dispose();
+          runtime.runGc();
+          return null;
+        });
+        function = runtime.evaluateHandle(
+          '(function () { release(); return [1, 2].map((x) => x * this.k); })',
+        ) as JsFunction;
+        self = runtime.evaluateHandle('({k: 21})');
+        expect(function.call([], self), [21, 42]);
       });
     });
   });

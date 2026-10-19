@@ -5,6 +5,7 @@
 // found in the LICENSE file in the root of this package.
 
 import 'dart:async';
+import 'dart:isolate';
 import 'dart:typed_data';
 
 import 'package:gg_quickjs/gg_quickjs.dart';
@@ -62,6 +63,12 @@ void main() {
         }
         expect(outcomes, contains('started'));
         expect(outcomes, contains('out of memory'));
+      });
+
+      test('does not keep its isolate alive', () async {
+        final exited = ReceivePort();
+        await Isolate.spawn((_) => JsRuntime(), null, onExit: exited.sendPort);
+        await exited.first.timeout(const Duration(seconds: 10));
       });
     });
 
@@ -164,6 +171,18 @@ void main() {
         expect(
           () => runtime.evaluate('const a = {}; a.self = a; a'),
           throwsA(isA<JsTypeError>()),
+        );
+      });
+
+      test('reads the entries of a Map through its iterator', () {
+        expect(
+          () => runtime.evaluate(
+            'Map.prototype[Symbol.iterator] = function* () {\n'
+            '  yield {get 0() { throw new Error("entry"); }};\n'
+            '};\n'
+            'new Map([[1, 2]])',
+          ),
+          throwsA(isA<JsError>().having((e) => e.message, 'message', 'entry')),
         );
       });
 
@@ -633,6 +652,34 @@ void main() {
         expect(runtime.evaluate('1 + 1'), 2);
       });
 
+      test('covers the conversion of the result', () {
+        final runtime = JsRuntime(
+          options: const JsRuntimeOptions(timeout: Duration(milliseconds: 50)),
+        );
+        addTearDown(runtime.dispose);
+        expect(
+          () => runtime.evaluate('const a = []; a.length = 2 ** 32 - 1; a'),
+          throwsA(
+            isA<JsInterruptedError>().having(
+              (e) => e.timedOut,
+              'timedOut',
+              true,
+            ),
+          ),
+        );
+        expect(
+          () =>
+              runtime.evaluate('const b = []; b.length = 2 ** 32 - 1; throw b'),
+          throwsA(
+            isA<JsError>().having(
+              (e) => e.message,
+              'message',
+              'the thrown value cannot be converted',
+            ),
+          ),
+        );
+      });
+
       test('covers the pending jobs of a call', () {
         final runtime = JsRuntime(
           options: const JsRuntimeOptions(timeout: Duration(milliseconds: 50)),
@@ -662,6 +709,25 @@ void main() {
         );
         expect(runtime.evaluate('2'), 2);
       });
+
+      test('stops the conversion of a result', () {
+        runtime.registerFunction('stop', (_) {
+          runtime.interrupt();
+          return null;
+        });
+        expect(
+          () => runtime.evaluate(
+            'const a = []; a.length = 2 ** 32 - 1; stop(); a',
+          ),
+          throwsA(
+            isA<JsInterruptedError>().having(
+              (e) => e.timedOut,
+              'timedOut',
+              false,
+            ),
+          ),
+        );
+      });
     });
 
     group('options.memoryLimit', () {
@@ -678,6 +744,29 @@ void main() {
           throwsA(isA<JsOutOfMemoryError>()),
         );
         expect(runtime.evaluate('"still alive"'), 'still alive');
+      });
+
+      test('limits a converted value to four times the limit', () {
+        final runtime = JsRuntime(
+          options: const JsRuntimeOptions(memoryLimit: 4 * 1024 * 1024),
+        );
+        addTearDown(runtime.dispose);
+        runtime.evaluate(
+          'var v = "x".repeat(1 << 16); '
+          'for (let i = 0; i < 12; i++) v = [v, v]; 0',
+        );
+        expect(() => runtime.evaluate('v'), throwsA(isA<JsOutOfMemoryError>()));
+        expect(
+          () => runtime.evaluate('throw v'),
+          throwsA(
+            isA<JsError>().having(
+              (e) => e.message,
+              'message',
+              'the thrown value cannot be converted',
+            ),
+          ),
+        );
+        expect(runtime.evaluate('v[0][0].length'), 2);
       });
     });
 

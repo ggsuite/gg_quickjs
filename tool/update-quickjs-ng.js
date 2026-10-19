@@ -106,8 +106,9 @@ const writeVersion = (version) => {
 // .............................................................................
 // Main
 
+// The tag goes into a shell command, so it must be a plain tag name.
 const tag = process.argv[2];
-if (!tag) {
+if (!tag || !/^[A-Za-z0-9][\w.-]*$/.test(tag)) {
   console.log(yellow('Usage: node tool/update-quickjs-ng.js <tag>'));
   process.exit(1);
 }
